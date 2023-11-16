@@ -2,6 +2,7 @@ package com.adapty.internal.utils
 
 import android.content.Context
 import android.os.Build
+import android.provider.Settings.Secure
 import androidx.annotation.RestrictTo
 import com.adapty.internal.data.cache.CacheRepository
 import java.util.*
@@ -34,7 +35,7 @@ internal class MetaInfoRetriever(
     @JvmSynthetic
     val deviceName =
         (if (Build.MODEL.startsWith(Build.MANUFACTURER)) Build.MODEL else "${Build.MANUFACTURER} ${Build.MODEL}")
-            .capitalize(Locale.ENGLISH)
+            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ENGLISH) else it.toString() }
 
     @JvmSynthetic
     val adaptySdkVersion = com.adapty.BuildConfig.VERSION_NAME
@@ -65,5 +66,11 @@ internal class MetaInfoRetriever(
     val platform = "Android"
 
     @get:JvmSynthetic
+    val androidId get() = Secure.getString(appContext.contentResolver, Secure.ANDROID_ID)
+
+    @get:JvmSynthetic
     val timezone get() = TimeZone.getDefault().id
+
+    @JvmSynthetic
+    val builderVersion = "2.0.0"
 }

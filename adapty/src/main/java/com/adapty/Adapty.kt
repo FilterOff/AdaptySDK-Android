@@ -154,7 +154,7 @@ public object Adapty {
         locale: String? = null,
         callback: ResultCallback<AdaptyPaywall>,
     ) {
-        Logger.log(VERBOSE) { "getPaywall(id = $id)" }
+        Logger.log(VERBOSE) { "getPaywall(id = $id${locale?.let { ", locale = $locale" }.orEmpty()})" }
         if (!isActivated) {
             logNotInitializedError()
             callback.onResult(AdaptyResult.Error(notInitializedError))
@@ -196,21 +196,25 @@ public object Adapty {
      *
      * @param[paywall] The [AdaptyPaywall] for which you want to get a configuration.
      *
+     * @param[locale] This parameter is expected to be a language code composed of one or more subtags separated by the "-" character. The first subtag is for the language, the second one is for the region (The support for regions will be added later).
+     * Example: `"en"` means English, `"en-US"` represents US English.
+     *
      * @param[callback] A result containing the [AdaptyViewConfiguration] object.
      * Use it with [AdaptyUI](https://search.maven.org/artifact/io.adapty/android-ui) library.
      */
     @JvmStatic
     public fun getViewConfiguration(
         paywall: AdaptyPaywall,
+        locale: String,
         callback: ResultCallback<AdaptyViewConfiguration>
     ) {
-        Logger.log(VERBOSE) { "getViewConfiguration(id = ${paywall.id})" }
+        Logger.log(VERBOSE) { "getViewConfiguration(id = ${paywall.id}, locale = $locale)" }
         if (!isActivated) {
             logNotInitializedError()
             callback.onResult(AdaptyResult.Error(notInitializedError))
             return
         }
-        adaptyInternal.getViewConfiguration(paywall, callback)
+        adaptyInternal.getViewConfiguration(paywall, locale, callback)
     }
 
     /**
@@ -225,9 +229,11 @@ public object Adapty {
      * @param[subscriptionUpdateParams] An [AdaptySubscriptionUpdateParameters] object, used when
      * you need a subscription to be replaced with another one, [read more](https://docs.adapty.io/docs/android-making-purchases#change-subscription).
      *
+     * @param[isOfferPersonalized] Indicates whether the price is personalized, [read more](https://developer.android.com/google/play/billing/integrate#personalized-price).
+     *
      * @param[callback] A result containing the [AdaptyProfile] object (is null if and only if it was
-     * a subscription change with the [DEFERRED][AdaptySubscriptionUpdateParameters.ProrationMode.DEFERRED]
-     * proration mode). This model contains info about access levels, subscriptions, and non-subscription
+     * a subscription change with the [DEFERRED][AdaptySubscriptionUpdateParameters.ReplacementMode.DEFERRED]
+     * replacement mode). This model contains info about access levels, subscriptions, and non-subscription
      * purchases. Generally, you have to check only access level status to determine whether the user
      * has premium access to the app.
      *
@@ -239,15 +245,16 @@ public object Adapty {
         activity: Activity,
         product: AdaptyPaywallProduct,
         subscriptionUpdateParams: AdaptySubscriptionUpdateParameters? = null,
+        isOfferPersonalized: Boolean = false,
         callback: ResultCallback<AdaptyProfile?>,
     ) {
-        Logger.log(VERBOSE) { "makePurchase(vendorProductId = ${product.vendorProductId}${subscriptionUpdateParams?.let { "; oldVendorProductId = ${it.oldSubVendorProductId}; prorationMode = ${it.prorationMode}" }.orEmpty()})" }
+        Logger.log(VERBOSE) { "makePurchase(vendorProductId = ${product.vendorProductId}${product.subscriptionDetails?.let { "; basePlanId = ${it.basePlanId}${it.offerId?.let { offerId -> "; offerId = $offerId" }.orEmpty()}" }.orEmpty()}${subscriptionUpdateParams?.let { "; oldVendorProductId = ${it.oldSubVendorProductId}; replacementMode = ${it.replacementMode}" }.orEmpty()})" }
         if (!isActivated) {
             logNotInitializedError()
             callback.onResult(AdaptyResult.Error(notInitializedError))
             return
         }
-        adaptyInternal.makePurchase(activity, product, subscriptionUpdateParams, callback)
+        adaptyInternal.makePurchase(activity, product, subscriptionUpdateParams, isOfferPersonalized, callback)
     }
 
     /**

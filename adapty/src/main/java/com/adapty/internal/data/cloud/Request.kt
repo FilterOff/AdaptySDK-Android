@@ -8,9 +8,9 @@ import com.adapty.internal.data.cloud.Request.Method.*
 import com.adapty.internal.data.models.AttributionData
 import com.adapty.internal.data.models.InstallationMeta
 import com.adapty.internal.data.models.RestoreProductInfo
-import com.adapty.internal.data.models.ValidateProductInfo
 import com.adapty.internal.data.models.requests.*
-import com.adapty.models.AdaptyPaywallProduct.Type
+import com.adapty.internal.domain.models.PurchaseableProduct
+import com.adapty.internal.utils.MetaInfoRetriever
 import com.adapty.models.AdaptyProfileParameters
 import com.android.billingclient.api.Purchase
 import com.google.gson.Gson
@@ -98,6 +98,7 @@ internal class Request internal constructor(val baseUrl: String) {
 internal class RequestFactory(
     private val cacheRepository: CacheRepository,
     private val responseCacheKeyProvider: ResponseCacheKeyProvider,
+    private val metaInfoRetriever: MetaInfoRetriever,
     private val gson: Gson
 ) {
 
@@ -166,15 +167,14 @@ internal class RequestFactory(
 
     @JvmSynthetic
     fun validatePurchaseRequest(
-        purchaseType: Type,
         purchase: Purchase,
-        product: ValidateProductInfo,
+        product: PurchaseableProduct,
     ) = cacheRepository.getProfileId().let { profileId ->
         buildRequest {
             method = POST
-            endPoint = "$inappsEndpointPrefix/google/token/validate/"
+            endPoint = "purchase/play-store/token/v2/validate/"
             body = gson.toJson(
-                ValidateReceiptRequest.create(profileId, purchase, product, purchaseType)
+                ValidateReceiptRequest.create(profileId, purchase, product)
             )
             currentDataWhenSent = Request.CurrentDataWhenSent(profileId)
         }
@@ -188,18 +188,10 @@ internal class RequestFactory(
                 body = gson.toJson(
                     RestoreReceiptRequest.create(profileId, purchases)
                 )
-                endPoint = "$inappsEndpointPrefix/google/token/restore/"
+                endPoint = "purchase/play-store/token/v2/restore/"
                 currentDataWhenSent = Request.CurrentDataWhenSent(profileId)
             }
         }
-
-    @JvmSynthetic
-    fun getProductsRequest() = buildRequest {
-        method = GET
-        endPoint = "$inappsEndpointPrefix/products/"
-        addQueryParam(Pair("profile_id", cacheRepository.getProfileId()))
-        responseCacheKeys = responseCacheKeyProvider.forGetProducts()
-    }
 
     @JvmSynthetic
     fun getProductIdsRequest() = buildRequest {
@@ -212,7 +204,7 @@ internal class RequestFactory(
     fun getPaywallRequest(id: String, locale: String?) = buildRequest {
         method = GET
         endPoint = "$inappsEndpointPrefix/purchase-containers/$id/"
-        addQueryParam(Pair("profile_id", cacheRepository.getProfileId()))
+        addQueryParam("profile_id" to cacheRepository.getProfileId())
         if (locale != null) {
             addQueryParam("locale" to locale)
         }
@@ -220,9 +212,11 @@ internal class RequestFactory(
     }
 
     @JvmSynthetic
-    fun getViewConfigurationRequest(variationId: String) = buildRequest {
+    fun getViewConfigurationRequest(variationId: String, locale: String) = buildRequest {
         method = GET
-        endPoint = "$inappsEndpointPrefix/paywall-builder/$variationId/"
+        endPoint = "$inappsEndpointPrefix/paywall-builder/v2/$variationId/"
+        addQueryParam("builder_version" to metaInfoRetriever.builderVersion)
+        addQueryParam("locale" to locale)
     }
 
     @JvmSynthetic

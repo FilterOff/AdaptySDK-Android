@@ -96,7 +96,7 @@ internal object Dependencies {
                         .registerTypeAdapterFactory(
                             AdaptyResponseTypeAdapterFactory(
                                 TypeToken.get(ViewConfigurationDto::class.java),
-                                attributesObjectExtractor,
+                                dataObjectExtractor,
                             )
                         )
                         .registerTypeAdapterFactory(
@@ -231,6 +231,7 @@ internal object Dependencies {
                         injectInternal(),
                         injectInternal(),
                         injectInternal(),
+                        injectInternal(),
                     )
                 }),
 
@@ -248,6 +249,10 @@ internal object Dependencies {
 
                 AdIdRetriever::class.java to singleVariantDiObject({
                     AdIdRetriever(appContext, injectInternal())
+                }),
+
+                AppSetIdRetriever::class.java to singleVariantDiObject({
+                    AppSetIdRetriever(appContext)
                 }),
 
                 CustomAttributeValidator::class.java to singleVariantDiObject({
@@ -272,11 +277,10 @@ internal object Dependencies {
                     ProductMapper(
                         appContext,
                         injectInternal(),
-                        injectInternal(),
                     )
                 }),
 
-                ProrationModeMapper::class.java to singleVariantDiObject({ ProrationModeMapper() }),
+                ReplacementModeMapper::class.java to singleVariantDiObject({ ReplacementModeMapper() }),
 
                 ProfileMapper::class.java to singleVariantDiObject({ ProfileMapper() }),
 
@@ -287,7 +291,6 @@ internal object Dependencies {
                 StoreManager::class.java to singleVariantDiObject({
                     StoreManager(
                         appContext,
-                        injectInternal(),
                         injectInternal(),
                     )
                 }),
@@ -348,6 +351,7 @@ internal object Dependencies {
                         injectInternal(),
                         injectInternal(),
                         injectInternal(),
+                        injectInternal(),
                         injectInternal()
                     )
                 }),
@@ -361,7 +365,6 @@ internal object Dependencies {
                         injectInternal(),
                         injectInternal(),
                         injectInternal(),
-                        observerMode,
                     )
                 }),
             )

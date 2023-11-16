@@ -6,14 +6,15 @@ import androidx.annotation.RestrictTo
 import com.adapty.errors.AdaptyError
 import com.adapty.errors.AdaptyErrorCode
 import com.adapty.internal.data.models.PurchaseRecordModel
+import com.adapty.internal.domain.models.PurchaseableProduct
 import com.adapty.internal.utils.*
-import com.adapty.models.AdaptyPaywallProduct.Type
 import com.adapty.models.AdaptySubscriptionUpdateParameters
 import com.adapty.utils.AdaptyLogLevel.Companion.ERROR
 import com.android.billingclient.api.*
 import com.android.billingclient.api.BillingClient.BillingResponseCode.*
-import com.android.billingclient.api.BillingClient.SkuType.INAPP
-import com.android.billingclient.api.BillingClient.SkuType.SUBS
+import com.android.billingclient.api.BillingClient.ProductType.INAPP
+import com.android.billingclient.api.BillingClient.ProductType.SUBS
+import com.android.billingclient.api.BillingFlowParams.ProductDetailsParams
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -25,8 +26,7 @@ import kotlin.coroutines.resumeWithException
 @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
 internal class StoreManager(
     context: Context,
-    private val prorationModeMapper: ProrationModeMapper,
-    private val productMapper: ProductMapper,
+    private val replacementModeMapper: ReplacementModeMapper,
 ) : PurchasesUpdatedListener {
 
     private val billingClient = BillingClient
@@ -48,7 +48,7 @@ internal class StoreManager(
             }
 
     private fun getPurchaseHistoryDataToRestoreForType(
-        @BillingClient.SkuType type: String,
+        @BillingClient.ProductType type: String,
         maxAttemptCount: Long,
     ): Flow<List<PurchaseRecordModel>> {
         return onConnected {
@@ -61,9 +61,8 @@ internal class StoreManager(
                             PurchaseRecordModel(
                                 purchase.purchaseToken,
                                 purchase.purchaseTime,
-                                purchase.skus,
+                                purchase.products,
                                 type,
-                                purchase.orderId,
                             )
                         )
                     }
@@ -73,9 +72,8 @@ internal class StoreManager(
                             PurchaseRecordModel(
                                 historyRecord.purchaseToken,
                                 historyRecord.purchaseTime,
-                                historyRecord.skus,
+                                historyRecord.products,
                                 type,
-                                null,
                             )
                         )
                     }
@@ -86,27 +84,30 @@ internal class StoreManager(
     }
 
     @JvmSynthetic
-    fun querySkuDetails(
-        skuList: List<String>,
+    fun queryProductDetails(
+        productList: List<String>,
         maxAttemptCount: Long,
-    ): Flow<List<SkuDetails>> =
-        querySkuDetailsForType(
-            SkuDetailsParams.newBuilder().setSkusList(skuList).setType(SUBS).build(),
+    ): Flow<List<ProductDetails>> =
+        queryProductDetailsForType(
+            productList,
+            SUBS,
             maxAttemptCount
         )
             .flatMapConcat { subsList ->
-                querySkuDetailsForType(
-                    SkuDetailsParams.newBuilder().setSkusList(skuList).setType(INAPP).build(),
+                queryProductDetailsForType(
+                    productList,
+                    INAPP,
                     maxAttemptCount
                 ).map { inAppList -> concatResults(subsList, inAppList) }
             }
 
-    private fun querySkuDetailsForType(
-        params: SkuDetailsParams,
+    private fun queryProductDetailsForType(
+        productList: List<String>,
+        @BillingClient.ProductType productType: String,
         maxAttemptCount: Long,
-    ): Flow<List<SkuDetails>> {
+    ): Flow<List<ProductDetails>> {
         return onConnected {
-            storeHelper.querySkuDetailsForType(params)
+            storeHelper.queryProductDetailsForType(productList, productType)
         }.retryOnConnectionError(maxAttemptCount)
     }
 
@@ -180,66 +181,61 @@ internal class StoreManager(
     }
 
     @JvmSynthetic
-    fun postProcess(purchase: Purchase, productType: Type, maxAttemptCount: Long) : Flow<Unit> {
-        return when {
-            productType == Type.CONSUMABLE -> consumePurchase(purchase, maxAttemptCount)
-            !purchase.isAcknowledged -> acknowledgePurchase(purchase, maxAttemptCount)
-            else -> flowOf(Unit)
+    fun queryInfoForProduct(productId: String, type: String) =
+        onConnected {
+            storeHelper.queryProductDetailsForType(listOf(productId), type)
+        }.map { productDetailsList ->
+            productDetailsList.firstOrNull { it.productId == productId }
+                ?: throw AdaptyError(
+                    message = "This product_id was not found with this purchase type",
+                    adaptyErrorCode = AdaptyErrorCode.PRODUCT_NOT_FOUND
+                )
         }
-    }
 
     @JvmSynthetic
     fun makePurchase(
         activity: Activity,
-        productId: String,
-        purchaseType: Type,
+        purchaseableProduct: PurchaseableProduct,
         subscriptionUpdateParams: AdaptySubscriptionUpdateParameters?,
         callback: MakePurchaseCallback
     ) {
         execute {
-            onConnected {
-                storeHelper.querySkuDetailsForType(
-                    params = SkuDetailsParams.newBuilder().setSkusList(listOf(productId))
-                        .setType(productMapper.mapProductTypeToGoogle(purchaseType)).build(),
-                ).flatMapConcat { skuDetailsForNewProduct ->
-                    if (subscriptionUpdateParams != null) {
-                        onConnected {
-                            storeHelper.queryPurchaseHistoryForType(SUBS)
-                                .map {
-                                    buildSubscriptionUpdateParams(
-                                        billingClient.queryPurchases(SUBS).purchasesList,
-                                        subscriptionUpdateParams,
-                                    ).let { updateParams -> skuDetailsForNewProduct to updateParams }
-                                }
+            if (subscriptionUpdateParams != null) {
+                onConnected {
+                    storeHelper.queryActivePurchasesForTypeWithSync(SUBS)
+                        .map { activeSubscriptions ->
+                            buildSubscriptionUpdateParams(
+                                activeSubscriptions,
+                                subscriptionUpdateParams,
+                            ).let { updateParams -> purchaseableProduct.productDetails to updateParams }
                         }
-                    } else {
-                        flowOf(skuDetailsForNewProduct to null)
-                    }
                 }
+            } else {
+                flowOf(purchaseableProduct.productDetails to null)
             }
                 .flowOnIO()
                 .catch { error -> onError(error, callback) }
-                .onEach { (skuDetailsList, billingFlowSubUpdateParams) ->
-                    skuDetailsList.firstOrNull { it.sku == productId }?.let { skuDetails ->
-                        makePurchaseCallback = MakePurchaseCallbackWrapper(
-                            productId,
-                            subscriptionUpdateParams?.oldSubVendorProductId,
-                            callback,
-                        )
+                .onEach { (productDetails, billingFlowSubUpdateParams) ->
+                    makePurchaseCallback = MakePurchaseCallbackWrapper(
+                        productDetails.productId,
+                        subscriptionUpdateParams?.oldSubVendorProductId,
+                        callback,
+                    )
 
-                        billingClient.launchBillingFlow(
-                            activity,
-                            BillingFlowParams.newBuilder()
-                                .setSkuDetails(skuDetails)
-                                .apply { billingFlowSubUpdateParams?.let(::setSubscriptionUpdateParams) }
-                                .build()
-                        )
-                    } ?: callback.invoke(
-                        null,
-                        AdaptyError(
-                            message = "This product_id was not found with this purchase type",
-                            adaptyErrorCode = AdaptyErrorCode.PRODUCT_NOT_FOUND
-                        )
+                    val params = ProductDetailsParams.newBuilder()
+                        .setProductDetails(productDetails)
+                        .apply { purchaseableProduct.currentOfferDetails?.offerToken?.let(::setOfferToken) }
+                        .build()
+
+                    billingClient.launchBillingFlow(
+                        activity,
+                        BillingFlowParams.newBuilder()
+                            .setProductDetailsParamsList(listOf(params))
+                            .apply {
+                                purchaseableProduct.isOfferPersonalized.takeIf { it }?.let(::setIsOfferPersonalized)
+                                billingFlowSubUpdateParams?.let(::setSubscriptionUpdateParams)
+                            }
+                            .build()
                     )
                 }
                 .flowOnMain()
@@ -252,12 +248,12 @@ internal class StoreManager(
         subscriptionUpdateParams: AdaptySubscriptionUpdateParameters,
     ): BillingFlowParams.SubscriptionUpdateParams =
         purchasesList
-            ?.firstOrNull { it.skus.firstOrNull() == subscriptionUpdateParams.oldSubVendorProductId }
+            ?.firstOrNull { it.products.firstOrNull() == subscriptionUpdateParams.oldSubVendorProductId }
             ?.let { subToBeReplaced ->
                 BillingFlowParams.SubscriptionUpdateParams.newBuilder()
-                    .setOldSkuPurchaseToken(subToBeReplaced.purchaseToken)
-                    .setReplaceSkusProrationMode(
-                        prorationModeMapper.map(subscriptionUpdateParams.prorationMode)
+                    .setOldPurchaseToken(subToBeReplaced.purchaseToken)
+                    .setSubscriptionReplacementMode(
+                        replacementModeMapper.map(subscriptionUpdateParams.replacementMode)
                     )
                     .build()
             }
@@ -269,47 +265,28 @@ internal class StoreManager(
                 )
             }
 
-    private fun acknowledgePurchase(purchase: Purchase, maxAttemptCount: Long) =
-        onConnected {
-            storeHelper.acknowledgePurchase(
-                AcknowledgePurchaseParams.newBuilder()
-                    .setPurchaseToken(purchase.purchaseToken)
-                    .build()
-            )
-        }
-            .retryOnConnectionError(maxAttemptCount)
-            .flowOnIO()
-
-    @JvmSynthetic
-    fun queryActiveSubsAndInApps(maxAttemptCount: Long) =
-        onConnected {
-            storeHelper.queryActivePurchasesForType(SUBS)
-                .flatMapConcat { activeSubs ->
-                    storeHelper.queryActivePurchasesForType(INAPP)
-                        .map { inapps -> activeSubs to inapps }
-                }
-        }
-            .retryOnConnectionError(maxAttemptCount)
-            .flowOnIO()
-
     @JvmSynthetic
     fun findActivePurchaseForProduct(
         productId: String,
-        @BillingClient.SkuType productType: String
+        @BillingClient.ProductType productType: String
     ) =
-        billingClient.queryPurchases(productType).purchasesList
-            ?.firstOrNull { it.purchaseState == Purchase.PurchaseState.PURCHASED && it.skus.firstOrNull() == productId }
+        queryActivePurchasesForType(productType, DEFAULT_RETRY_COUNT)
+            .map { purchases ->
+                purchases.firstOrNull {
+                    it.purchaseState == Purchase.PurchaseState.PURCHASED && it.products.firstOrNull() == productId
+                }
+            }
 
-    private fun consumePurchase(purchase: Purchase, maxAttemptCount: Long) =
-        onConnected {
-            storeHelper.consumePurchase(
-                ConsumeParams.newBuilder()
-                    .setPurchaseToken(purchase.purchaseToken)
-                    .build()
-            )
+    private fun queryActivePurchasesForType(
+        @BillingClient.ProductType type: String,
+        maxAttemptCount: Long,
+    ): Flow<List<Purchase>> {
+        return onConnected {
+            storeHelper.queryActivePurchasesForType(type)
         }
             .retryOnConnectionError(maxAttemptCount)
             .flowOnIO()
+    }
 
     private fun <T> onConnected(call: () -> Flow<T>): Flow<T> =
         restoreConnection()
@@ -380,7 +357,7 @@ internal class StoreManager(
             error !is AdaptyError || error.originalError is IOException || error.adaptyErrorCode in arrayOf(
                 AdaptyErrorCode.BILLING_SERVICE_DISCONNECTED,
                 AdaptyErrorCode.BILLING_SERVICE_UNAVAILABLE,
-                AdaptyErrorCode.BILLING_SERVICE_TIMEOUT
+                AdaptyErrorCode.BILLING_NETWORK_ERROR,
             ) -> true
             error.adaptyErrorCode == AdaptyErrorCode.BILLING_ERROR
                     && ((maxAttemptCount.takeIf { it in 0..DEFAULT_RETRY_COUNT } ?: DEFAULT_RETRY_COUNT) > attempt) -> true
@@ -392,22 +369,40 @@ internal class StoreManager(
 private class StoreHelper(private val billingClient: BillingClient) {
 
     @JvmSynthetic
-    fun querySkuDetailsForType(params: SkuDetailsParams) =
+    fun queryProductDetailsForType(productList: List<String>, @BillingClient.ProductType productType: String) =
         flow {
-            val skuDetailsResult = billingClient.querySkuDetails(params)
-            if (skuDetailsResult.billingResult.responseCode == OK) {
+            val params = QueryProductDetailsParams.newBuilder().setProductList(
+                productList.map { productId ->
+                    QueryProductDetailsParams.Product.newBuilder().setProductId(productId).setProductType(productType).build()
+                }
+            ).build()
+            val productDetailsResult = billingClient.queryProductDetails(params)
+            if (productDetailsResult.billingResult.responseCode == OK) {
                 emit(
-                    skuDetailsResult.skuDetailsList.orEmpty()
+                    productDetailsResult.productDetailsList.orEmpty()
                 )
             } else {
-                throwException(skuDetailsResult.billingResult, "on query product details")
+                throwException(productDetailsResult.billingResult, "on query product details")
             }
         }
 
     @JvmSynthetic
-    fun queryPurchaseHistoryForType(@BillingClient.SkuType type: String) =
+    fun queryActivePurchasesForType(@BillingClient.ProductType type: String) =
         flow {
-            val purchaseHistoryResult = billingClient.queryPurchaseHistory(type)
+            val params = QueryPurchasesParams.newBuilder().setProductType(type).build()
+            val purchasesResult = billingClient.queryPurchasesAsync(params)
+            if (purchasesResult.billingResult.responseCode == OK) {
+                emit(purchasesResult.purchasesList)
+            } else {
+                throwException(purchasesResult.billingResult, "on query active purchases")
+            }
+        }
+
+    @JvmSynthetic
+    fun queryPurchaseHistoryForType(@BillingClient.ProductType type: String) =
+        flow {
+            val params = QueryPurchaseHistoryParams.newBuilder().setProductType(type).build()
+            val purchaseHistoryResult = billingClient.queryPurchaseHistory(params)
             if (purchaseHistoryResult.billingResult.responseCode == OK) {
                 emit(purchaseHistoryResult.purchaseHistoryRecordList.orEmpty())
             } else {
@@ -416,40 +411,19 @@ private class StoreHelper(private val billingClient: BillingClient) {
         }
 
     @JvmSynthetic
-    fun queryAllPurchasesForType(@BillingClient.SkuType type: String) =
+    fun queryAllPurchasesForType(@BillingClient.ProductType type: String) =
         queryPurchaseHistoryForType(type)
-            .map { historyRecords ->
-                val activePurchases = billingClient.queryPurchases(type).purchasesList
-                    ?.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }.orEmpty()
-                historyRecords to activePurchases
+            .flatMapConcat { historyRecords ->
+                queryActivePurchasesForType(type)
+                    .map { activePurchases ->
+                        historyRecords to activePurchases.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
+                    }
             }
 
     @JvmSynthetic
-    fun queryActivePurchasesForType(@BillingClient.SkuType type: String) =
+    fun queryActivePurchasesForTypeWithSync(@BillingClient.ProductType type: String) =
         queryAllPurchasesForType(type)
             .map { (_, activePurchases) -> activePurchases }
-
-    @JvmSynthetic
-    fun acknowledgePurchase(params: AcknowledgePurchaseParams) =
-        flow {
-            val result = billingClient.acknowledgePurchase(params)
-            if (result.responseCode == OK) {
-                emit(Unit)
-            } else {
-                throwException(result, "on acknowledge")
-            }
-        }
-
-    @JvmSynthetic
-    fun consumePurchase(params: ConsumeParams) =
-        flow {
-            val result = billingClient.consumePurchase(params).billingResult
-            if (result.responseCode == OK) {
-                emit(Unit)
-            } else {
-                throwException(result, "on consume")
-            }
-        }
 
     @JvmSynthetic
     fun errorMessageFromBillingResult(billingResult: BillingResult, where: String) =
@@ -477,10 +451,10 @@ private class MakePurchaseCallbackWrapper(
     private val wasInvoked = AtomicBoolean(false)
 
     override operator fun invoke(purchase: Purchase?, error: AdaptyError?) {
-        val purchaseSku = purchase?.skus?.firstOrNull()
-        if (purchaseSku == null || listOfNotNull(productId, oldSubProductId).contains(purchaseSku)) {
+        val purchaseProductId = purchase?.products?.firstOrNull()
+        if (purchaseProductId == null || listOfNotNull(productId, oldSubProductId).contains(purchaseProductId)) {
             if (wasInvoked.compareAndSet(false, true)) {
-                callback.invoke(if (error == null && productId == purchaseSku) purchase else null, error)
+                callback.invoke(if (error == null && productId == purchaseProductId) purchase else null, error)
             }
         }
     }
